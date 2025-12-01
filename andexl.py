@@ -25,14 +25,14 @@ def create_team(first_index, second_index, is_red,
 
 
 ##########################
-# COMMON HELPER ROUTINES #
+#HELPERS#
 ##########################
 
-def manhattan(a, b):
+def manhattan(a, b): #Returns the Manhattan distance between points a and b. We use it for heuristic calculations.(A* search).
     return abs(a[0] - b[0]) + abs(a[1] - b[1])
 
 
-def neighbours(pos, walls):
+def neighbours(pos, walls): #Returns legal neighbouring positions. Used in A* search.
     """Returns legal neighbouring positions."""
     x, y = pos
     res = []
@@ -62,7 +62,8 @@ class HybridOffensive(CaptureAgent):
         self.capsule_radius = 8
         self.evade_timer = 0
         self.min_evade_steps = 15 
-    # -----------------------------------------------
+        
+    # ---Choose action --- Main function to choose action each turn. We use different modes: Evade, Hunt scared ghost, Return home, Collect food.
 
     def choose_action(self, game_state):
         legal = game_state.get_legal_actions(self.index)
@@ -88,9 +89,8 @@ class HybridOffensive(CaptureAgent):
             if g.scared_timer > 0 
         ]
 
-        # ----------------------------------------------------
-        # Decide behaviour mode 
-        # ----------------------------------------------------
+        # ---Decide behaviour mode --- Determines the current mode of the agent based on game state.
+        
         mode = "collect"
         target = self.start 
 
@@ -143,9 +143,9 @@ class HybridOffensive(CaptureAgent):
 
         return self.direction_from(my_pos, nxt)
 
-    # -----------------------------------------------
-    # Other functions used for OFFENSIVE
-    # -----------------------------------------------
+    # -----------------
+    # Other functions 
+    # -----------------
 
     def best_offensive_target(self, game_state, pos, food_list, capsules, ghosts):
         """
@@ -182,7 +182,7 @@ class HybridOffensive(CaptureAgent):
             # Assume risk in case no other option is aviable
             return min(food_list, key=lambda f: self.get_maze_distance(pos, f))
 
-    # -----------------------------------------------
+    # ---Closest home --- Used in choose_action to find nearest home position.
 
     def closest_home(self, game_state, pos):
         walls = game_state.get_walls()
@@ -192,7 +192,7 @@ class HybridOffensive(CaptureAgent):
         if not candidates: return self.start
         return min(candidates, key=lambda p: self.get_maze_distance(pos, p))
 
-    # -----------------------------------------------
+    # ---A* Search for next step --- Used in choose_action to get next step towards target. We use a simplified A* that returns only the next step, we use this algorithm for pathfinding because it allows us to incorporate dynamic step costs based on ghost proximity.
 
     def astar_next(self, game_state, start, goal, mode):
         """Simplified A*: returns only the next step towards goal."""
@@ -233,7 +233,7 @@ class HybridOffensive(CaptureAgent):
             step = came[step]
         return step
 
-    # -----------------------------------------------
+    # ---Step cost calculation --- Used in A* search to calculate cost of stepping into a position. Higher cost for positions near normal ghosts, lower cost for positions near scared ghosts.
 
     def step_cost(self, game_state, pos, mode):
         """
@@ -271,7 +271,7 @@ class HybridOffensive(CaptureAgent):
         
         return max(0.01, base)
 
-    # -----------------------------------------------
+    # ----Direction from a to b --- Used in choose_action to convert position to action.
 
     def direction_from(self, a, b):
         ax, ay = a
@@ -301,7 +301,7 @@ class HybridDefensive(CaptureAgent):
         self.prev_position = None    
         self.last_action = None
 
-    # -------------------------------------------------------------
+    # ---Choose action --- Main function to choose action each turn. We use different modes: Chase invader, Chase last seen, Patrol mode.
 
     def choose_action(self, game_state):
         legal = [a for a in game_state.get_legal_actions(self.index)
@@ -355,10 +355,11 @@ class HybridDefensive(CaptureAgent):
 
         return chosen
 
-    # -----------------------------------------------
-    # Other functions used for DEFENSIVE
-    # -----------------------------------------------
+    # --------------------
+    # Other functions 
+    # ---------------------
 
+    #---Compute patrol points --- Used in register_initial_state to set patrol points.
     def compute_patrol(self, game_state):
         food = self.get_food_you_are_defending(game_state).as_list()
         walls = game_state.get_walls()
@@ -373,13 +374,13 @@ class HybridDefensive(CaptureAgent):
 
         return random.sample(candidates, min(6, len(candidates))) if candidates else [self.start]
 
-    # -------------------------------------------------------------
+    # ---Get invaders --- Used in choose_action, if invaders exist, chase them.
 
     def get_invaders(self, game_state):
         enemies = [game_state.get_agent_state(i) for i in self.get_opponents(game_state)]
         return [e for e in enemies if e.is_pacman and e.get_position()]
 
-    # -------------------------------------------------------------
+    #---A* Search for next step --- Used in choose_action to get next step towards target.
 
     def astar_next(self, game_state, start, goal):
         walls = game_state.get_walls()
@@ -422,8 +423,7 @@ class HybridDefensive(CaptureAgent):
 
         return step
 
-    # -------------------------------------------------------------
-
+    #---Neighbours with actions --- Used in A* search to get legal neighbouring positions along with the action needed to reach them.
     def neighbours_with_actions(self, pos, walls):
         x, y = pos
         dirs = {
@@ -434,8 +434,7 @@ class HybridDefensive(CaptureAgent):
         }
         return [(p, d) for d, p in dirs.items() if not walls[p[0]][p[1]]]
 
-    # -------------------------------------------------------------
-
+    #---Direction from a to b --- Used in choose_action to convert position to action.
     def direction_from(self, a, b):
         ax, ay = a
         bx, by = b

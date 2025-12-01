@@ -4,10 +4,12 @@
 import random
 import math
 import time
-
 import contest.util as util
+
 from contest.capture_agents import CaptureAgent
 from contest.game import Directions
+from game import Actions
+
 
 
 #######################
@@ -53,16 +55,13 @@ class HybridOffensive(CaptureAgent):
         self.distancer.get_maze_distances()
         self.start = game_state.get_agent_position(self.index)
 
-        # AJUSTES DE CAUTELA/AGRESIVIDAD
+        # Fixed tunning Values
         self.return_threshold = 6
         self.search_timeout = 0.35
         self.danger_radius = 3
         self.capsule_radius = 8
-        
-        # NUEVOS CONTADORES PARA HISTERESIS (PERSISTENCIA DE MODO)
         self.evade_timer = 0
-        self.min_evade_steps = 15 # Mínimo de pasos para permanecer en Evade
-
+        self.min_evade_steps = 15 
     # -----------------------------------------------
 
     def choose_action(self, game_state):
@@ -77,46 +76,46 @@ class HybridOffensive(CaptureAgent):
         enemies = [game_state.get_agent_state(i) for i in self.get_opponents(game_state)]
         visible_ghosts = [e for e in enemies if not e.is_pacman and e.get_position()]
         
-        # Fantasmas no asustados y cercanos (PELIGRO)
+        # Near ghosts, not scared
         chasing_ghosts = [
             g for g in visible_ghosts 
             if g.scared_timer == 0 and self.get_maze_distance(my_pos, g.get_position()) <= self.danger_radius
         ]
         
-        # Fantasma asustado (OPORTUNIDAD)
+        # Ghost scared
         scared_targets = [
             g for g in visible_ghosts 
             if g.scared_timer > 0 
         ]
 
         # ----------------------------------------------------
-        # Decide behaviour mode (con Histeresis)
+        # Decide behaviour mode 
         # ----------------------------------------------------
         mode = "collect"
-        target = self.start # Objetivo de fallback
+        target = self.start 
 
+        # Evade mode
         if self.evade_timer > 0:
-            # 1. ESTAMOS EN MODO EVASIÓN FORZADA (PERSISTENCIA)
             self.evade_timer -= 1
             mode = "evade"
             target = self.closest_home(game_state, my_pos)
             
-            # Si el agente llega a su lado, la evasión forzada termina
+            # If pac-man reached null evade
             if not state.is_pacman:
                  self.evade_timer = 0
         
+        # Evade ghost
         if chasing_ghosts:
-            # 2. PELIGRO INMINENTE: INICIAR EVASIÓN FORZADA
             mode = "evade"
             target = self.closest_home(game_state, my_pos)
-            # Reiniciar el contador de evasión
+
+            # Reset
             if self.evade_timer == 0:
                  self.evade_timer = self.min_evade_steps
-                 
+        
+        # Chase ghost
         elif scared_targets:
-            # 3. CAZAR FANTASMAS ASUSTADOS
             target_ghost = min(scared_targets, key=lambda g: self.get_maze_distance(my_pos, g.get_position()))
-            # Si el timer está muy bajo y llevamos comida, volvemos a casa.
             if target_ghost.scared_timer < 5 and state.num_carrying > 0:
                 mode = "return"
                 target = self.closest_home(game_state, my_pos)
@@ -124,20 +123,20 @@ class HybridOffensive(CaptureAgent):
                 mode = "hunt_scared"
                 target = target_ghost.get_position()
 
+        # Back home to note points
         elif state.num_carrying >= self.return_threshold:
-            # 4. RETORNO PARA ANOTAR PUNTOS.
             mode = "return"
             target = self.closest_home(game_state, my_pos)
         
+        # Take food
         else:
-            # 5. RECOLECCIÓN Y ATAQUE ESTRATÉGICO.
             mode = "collect"
             food = self.get_food(game_state).as_list()
             capsules = self.get_capsules(game_state)
             
             target = self.best_offensive_target(game_state, my_pos, food, capsules, visible_ghosts)
 
-        # A* → next step only
+        # A* for next step
         nxt = self.astar_next(game_state, my_pos, target, mode)
         if not nxt:
             return random.choice(legal)
@@ -145,15 +144,14 @@ class HybridOffensive(CaptureAgent):
         return self.direction_from(my_pos, nxt)
 
     # -----------------------------------------------
-    # RESTO DE FUNCIONES (best_offensive_target, closest_home, astar_next, step_cost, direction_from)
-    # Se mantienen IGUALES a la versión V2 (cuidado con copiar solo la parte superior).
+    # Other functions used for OFFENSIVE
     # -----------------------------------------------
 
     def best_offensive_target(self, game_state, pos, food_list, capsules, ghosts):
         """
-        Elige entre Power Capsules cercanas y la comida más segura/cercana.
+        Chosse near safest food
         """
-        # Prioridad a las cápsulas cercanas
+        # Prioroity to near capusles
         near_capsules = [
             c for c in capsules 
             if self.get_maze_distance(pos, c) <= self.capsule_radius
@@ -164,12 +162,13 @@ class HybridOffensive(CaptureAgent):
         if not food_list:
             return self.start
 
-        # Comida que no está demasiado cerca de fantasmas no asustados
+        # Food away from ghosts
         safe_food = []
         for f in food_list:
             danger = False
             for g in ghosts:
-                # Solo fantasmas NO asustados son una amenaza aquí
+
+                # Not scared Ghosts
                 if g.scared_timer == 0 and self.get_maze_distance(f, g.get_position()) <= self.danger_radius:
                     danger = True
                     break
@@ -177,10 +176,10 @@ class HybridOffensive(CaptureAgent):
                 safe_food.append(f)
 
         if safe_food:
-            # Elige la comida segura más cercana
+            # Choose food near to yourself
             return min(safe_food, key=lambda f: self.get_maze_distance(pos, f))
         else:
-            # Si toda la comida está cerca de fantasmas, elige la comida más cercana asumiendo riesgo
+            # Assume risk in case no other option is aviable
             return min(food_list, key=lambda f: self.get_maze_distance(pos, f))
 
     # -----------------------------------------------
@@ -238,8 +237,9 @@ class HybridOffensive(CaptureAgent):
 
     def step_cost(self, game_state, pos, mode):
         """
-        Costo personalizado que penaliza fantasmas no asustados y premia la caza.
+        Penalized cost when offensive
         """
+        
         base = 1.0
 
         enemies = [game_state.get_agent_state(i) for i in self.get_opponents(game_state)]
@@ -249,14 +249,14 @@ class HybridOffensive(CaptureAgent):
             g_pos = g.get_position()
             d = self.get_maze_distance(pos, g_pos)
 
+            # Chase scared ghost
             if g.scared_timer > 0:
-                # Fantasma Asustado: REDUCCIÓN AGRESIVA DEL COSTO para acercarse.
                 if mode == "hunt_scared":
                     base -= (40 - g.scared_timer) * 0.5 
                     if d <= 1: base = 0.01
-                # En otros modos, se ignora la penalización.
+            
+            # Evade normal ghost depending on proximity
             else:
-                # Fantasma NO Asustado: Aumento del costo (Amenaza).
                 if d == 0:
                     return 9999
                 elif d == 1:
@@ -284,11 +284,8 @@ class HybridOffensive(CaptureAgent):
 
 
 ##############################################
-#                 DEFENSIVE AGENT            #
+#              DEFENSIVE AGENT               #
 ##############################################
-
-# NOTA: EL AGENTE DEFENSIVO NO NECESITA HISTERESIS EN ESTA VERSIÓN.
-# Mantiene el código de la versión V2.
 
 class HybridDefensive(CaptureAgent):
 
@@ -299,100 +296,122 @@ class HybridDefensive(CaptureAgent):
 
         self.patrol_points = self.compute_patrol(game_state)
         self.current_patrol_index = 0
-        self.last_seen_invader = None
 
-    # -----------------------------------------------
+        self.last_seen_invader = None
+        self.prev_position = None    
+        self.last_action = None
+
+    # -------------------------------------------------------------
 
     def choose_action(self, game_state):
-        legal = game_state.get_legal_actions(self.index)
-        legal = [a for a in legal if a != Directions.STOP]
+        legal = [a for a in game_state.get_legal_actions(self.index)
+                 if a != Directions.STOP]
+
         if not legal:
             return Directions.STOP
 
         my_pos = game_state.get_agent_position(self.index)
-
         invaders = self.get_invaders(game_state)
 
+        # Chase invader
         if invaders:
             inv = min(invaders, key=lambda s: self.get_maze_distance(my_pos, s.get_position()))
-            self.last_seen_invader = inv.get_position() 
+            self.last_seen_invader = inv.get_position()
             target = self.last_seen_invader
-            mode = "chase"
-        
+
+        # Chase last seen
         elif self.last_seen_invader:
-            if self.get_maze_distance(my_pos, self.last_seen_invader) < 5:
+            if self.get_maze_distance(my_pos, self.last_seen_invader) <= 6:
                 target = self.last_seen_invader
-                mode = "chase_last_seen"
             else:
                 self.last_seen_invader = None
                 target = self.patrol_points[self.current_patrol_index]
-                mode = "patrol"
-        
+
+        # Patrol Mode
         else:
             target = self.patrol_points[self.current_patrol_index]
-            mode = "patrol"
-            
             if my_pos == target:
                 self.current_patrol_index = (self.current_patrol_index + 1) % len(self.patrol_points)
                 target = self.patrol_points[self.current_patrol_index]
-        
-        nxt = self.astar_next(game_state, my_pos, target, mode)
+
+        # Next Step
+        nxt = self.astar_next(game_state, my_pos, target)
+
         if not nxt:
-            return random.choice(legal)
+            chosen = random.choice(legal)
+        else:
+            chosen = self.direction_from(my_pos, nxt)
 
-        return self.direction_from(my_pos, nxt)
+        # Aviod osiclation
+        next_pos = Actions.get_successor(my_pos, chosen)
 
+        if self.prev_position == next_pos:  
+            options = [a for a in legal if a != chosen]
+            if options:
+                chosen = random.choice(options)
+
+        self.prev_position = my_pos
+        self.last_action = chosen
+
+        return chosen
+
+    # -----------------------------------------------
+    # Other functions used for DEFENSIVE
     # -----------------------------------------------
 
     def compute_patrol(self, game_state):
+        food = self.get_food_you_are_defending(game_state).as_list()
         walls = game_state.get_walls()
-        food_on_side = self.get_food_you_are_defending(game_state).as_list()
-        
-        if food_on_side:
-            food_on_side.sort(key=lambda p: manhattan(self.start, p), reverse=True)
-            return food_on_side[:min(6, len(food_on_side))]
-        
+
+        if food:
+            food.sort(key=lambda p: manhattan(self.start, p), reverse=True)
+            return food[:min(6, len(food))]
+
         mid = walls.width // 2
-        x_home = mid - 1 if self.red else mid
-        candidates = [(x_home, y) for y in range(walls.height) if not walls[x_home][y]]
-        
+        home_x = mid - 1 if self.red else mid
+        candidates = [(home_x, y) for y in range(walls.height) if not walls[home_x][y]]
+
         return random.sample(candidates, min(6, len(candidates))) if candidates else [self.start]
 
-
-    # -----------------------------------------------
+    # -------------------------------------------------------------
 
     def get_invaders(self, game_state):
         enemies = [game_state.get_agent_state(i) for i in self.get_opponents(game_state)]
         return [e for e in enemies if e.is_pacman and e.get_position()]
 
-    def astar_next(self, game_state, start, goal, mode):
+    # -------------------------------------------------------------
+
+    def astar_next(self, game_state, start, goal):
         walls = game_state.get_walls()
         start = tuple(start)
         goal = tuple(goal)
 
         frontier = util.PriorityQueue()
-        frontier.push(start, 0)
+        frontier.push((start, None), 0)
 
         came = {}
         cost = {start: 0}
 
         t0 = time.time()
-        search_timeout = 0.35
 
         while not frontier.is_empty():
-            if time.time() - t0 > search_timeout:
+            if time.time() - t0 > 0.35:
                 return None
 
-            cur = frontier.pop()
+            (cur, action_to_cur) = frontier.pop()
+
             if cur == goal:
                 break
 
-            for nxt in neighbours(cur, walls):
-                c = cost[cur] + 1
-                if nxt not in cost or c < cost[nxt]:
-                    cost[nxt] = c
-                    frontier.push(nxt, c + manhattan(nxt, goal))
+            for nxt, act in self.neighbours_with_actions(cur, walls):
+                reverse_penalty = 4 if self.last_action and act == Directions.REVERSE[self.last_action] else 0
+                new_cost = cost[cur] + 1 + reverse_penalty
+
+                if nxt not in cost or new_cost < cost[nxt]:
+                    cost[nxt] = new_cost
                     came[nxt] = cur
+                    priority = new_cost + manhattan(nxt, goal)
+                    frontier.push((nxt, act), priority)
 
         if goal not in came:
             return None
@@ -400,7 +419,22 @@ class HybridDefensive(CaptureAgent):
         step = goal
         while came[step] != start:
             step = came[step]
+
         return step
+
+    # -------------------------------------------------------------
+
+    def neighbours_with_actions(self, pos, walls):
+        x, y = pos
+        dirs = {
+            Directions.NORTH: (x, y + 1),
+            Directions.SOUTH: (x, y - 1),
+            Directions.EAST:  (x + 1, y),
+            Directions.WEST:  (x - 1, y)
+        }
+        return [(p, d) for d, p in dirs.items() if not walls[p[0]][p[1]]]
+
+    # -------------------------------------------------------------
 
     def direction_from(self, a, b):
         ax, ay = a

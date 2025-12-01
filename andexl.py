@@ -1,197 +1,412 @@
-# baseline_team.py
-# ---------------
-# Licensing Information:  You are free to use or extend these projects for
-# educational purposes provided that (1) you do not distribute or publish
-# solutions, (2) you retain this notice, and (3) you provide clear
-# attribution to UC Berkeley, including a link to http://ai.berkeley.edu.
-# 
-# Attribution Information: The Pacman AI projects were developed at UC Berkeley.
-# The core projects and autograders were primarily created by John DeNero
-# (denero@cs.berkeley.edu) and Dan Klein (klein@cs.berkeley.edu).
-# Student side autograding was added by Brad Miller, Nick Hay, and
-# Pieter Abbeel (pabbeel@cs.berkeley.edu).
-
-
-# baseline_team.py
-# ---------------
-# Licensing Information: Please do not distribute or publish solutions to this
-# project. You are free to use and extend these projects for educational
-# purposes. The Pacman AI projects were developed at UC Berkeley, primarily by
-# John DeNero (denero@cs.berkeley.edu) and Dan Klein (klein@cs.berkeley.edu).
-# For more info, see http://inst.eecs.berkeley.edu/~cs188/sp09/pacman.html
+# Team strategy for Pacman Capture the Flag.
+# Focus on aggressive scared ghost hunting, strategic defense, and mode stability.
 
 import random
-import util
+import math
+import time
 
-from capture_agents import CaptureAgent
-from game import Directions
-from util import nearest_point
+import contest.util as util
+from contest.capture_agents import CaptureAgent
+from contest.game import Directions
 
 
-#################
-# Team creation #
-#################
+#######################
+# Team Initialization #
+#######################
 
 def create_team(first_index, second_index, is_red,
-                first='OffensiveReflexAgent', second='DefensiveReflexAgent', num_training=0):
+                first_agent='HybridOffensive', second_agent='HybridDefensive'):
     """
-    This function should return a list of two agents that will form the
-    team, initialized using firstIndex and secondIndex as their agent
-    index numbers.  isRed is True if the red team is being created, and
-    will be False if the blue team is being created.
-
-    As a potentially helpful development aid, this function can take
-    additional string-valued keyword arguments ("first" and "second" are
-    such arguments in the case of this function), which will come from
-    the --redOpts and --blueOpts command-line arguments to capture.py.
-    For the nightly contest, however, your team will be created without
-    any extra arguments, so you should make sure that the default
-    behavior is what you want for the nightly contest.
+    Creates your two agents.
     """
-    return [eval(first)(first_index), eval(second)(second_index)]
+    return [eval(first_agent)(first_index), eval(second_agent)(second_index)]
 
 
-##########
-# Agents #
-##########
+##########################
+# COMMON HELPER ROUTINES #
+##########################
 
-class ReflexCaptureAgent(CaptureAgent):
-    """
-    A base class for reflex agents that choose score-maximizing actions
-    """
+def manhattan(a, b):
+    return abs(a[0] - b[0]) + abs(a[1] - b[1])
 
-    def __init__(self, index, time_for_computing=.1):
-        super().__init__(index, time_for_computing)
-        self.start = None
+
+def neighbours(pos, walls):
+    """Returns legal neighbouring positions."""
+    x, y = pos
+    res = []
+    for dx, dy in [(-1,0),(1,0),(0,-1),(0,1)]:
+        nx, ny = x + dx, y + dy
+        if 0 <= nx < walls.width and 0 <= ny < walls.height:
+            if not walls[nx][ny]:
+                res.append((nx,ny))
+    return res
+
+
+##############################################
+#         OFFENSIVE / HYBRID AGENT           #
+##############################################
+
+class HybridOffensive(CaptureAgent):
 
     def register_initial_state(self, game_state):
+        super().register_initial_state(game_state)
+        self.distancer.get_maze_distances()
         self.start = game_state.get_agent_position(self.index)
-        CaptureAgent.register_initial_state(self, game_state)
+
+        # AJUSTES DE CAUTELA/AGRESIVIDAD
+        self.return_threshold = 6
+        self.search_timeout = 0.35
+        self.danger_radius = 3
+        self.capsule_radius = 8
+        
+        # NUEVOS CONTADORES PARA HISTERESIS (PERSISTENCIA DE MODO)
+        self.evade_timer = 0
+        self.min_evade_steps = 15 # Mínimo de pasos para permanecer en Evade
+
+    # -----------------------------------------------
 
     def choose_action(self, game_state):
-        """
-        Picks among the actions with the highest Q(s,a).
-        """
-        actions = game_state.get_legal_actions(self.index)
+        legal = game_state.get_legal_actions(self.index)
+        legal = [a for a in legal if a != Directions.STOP]
+        if not legal:
+            return Directions.STOP
 
-        # You can profile your evaluation time by uncommenting these lines
-        # start = time.time()
-        values = [self.evaluate(game_state, a) for a in actions]
-        # print 'eval time for agent %d: %.4f' % (self.index, time.time() - start)
+        my_pos = game_state.get_agent_position(self.index)
+        state = game_state.get_agent_state(self.index)
 
-        max_value = max(values)
-        best_actions = [a for a, v in zip(actions, values) if v == max_value]
+        enemies = [game_state.get_agent_state(i) for i in self.get_opponents(game_state)]
+        visible_ghosts = [e for e in enemies if not e.is_pacman and e.get_position()]
+        
+        # Fantasmas no asustados y cercanos (PELIGRO)
+        chasing_ghosts = [
+            g for g in visible_ghosts 
+            if g.scared_timer == 0 and self.get_maze_distance(my_pos, g.get_position()) <= self.danger_radius
+        ]
+        
+        # Fantasma asustado (OPORTUNIDAD)
+        scared_targets = [
+            g for g in visible_ghosts 
+            if g.scared_timer > 0 
+        ]
 
-        food_left = len(self.get_food(game_state).as_list())
+        # ----------------------------------------------------
+        # Decide behaviour mode (con Histeresis)
+        # ----------------------------------------------------
+        mode = "collect"
+        target = self.start # Objetivo de fallback
 
-        if food_left <= 2:
-            best_dist = 9999
-            best_action = None
-            for action in actions:
-                successor = self.get_successor(game_state, action)
-                pos2 = successor.get_agent_position(self.index)
-                dist = self.get_maze_distance(self.start, pos2)
-                if dist < best_dist:
-                    best_action = action
-                    best_dist = dist
-            return best_action
+        if self.evade_timer > 0:
+            # 1. ESTAMOS EN MODO EVASIÓN FORZADA (PERSISTENCIA)
+            self.evade_timer -= 1
+            mode = "evade"
+            target = self.closest_home(game_state, my_pos)
+            
+            # Si el agente llega a su lado, la evasión forzada termina
+            if not state.is_pacman:
+                 self.evade_timer = 0
+        
+        if chasing_ghosts:
+            # 2. PELIGRO INMINENTE: INICIAR EVASIÓN FORZADA
+            mode = "evade"
+            target = self.closest_home(game_state, my_pos)
+            # Reiniciar el contador de evasión
+            if self.evade_timer == 0:
+                 self.evade_timer = self.min_evade_steps
+                 
+        elif scared_targets:
+            # 3. CAZAR FANTASMAS ASUSTADOS
+            target_ghost = min(scared_targets, key=lambda g: self.get_maze_distance(my_pos, g.get_position()))
+            # Si el timer está muy bajo y llevamos comida, volvemos a casa.
+            if target_ghost.scared_timer < 5 and state.num_carrying > 0:
+                mode = "return"
+                target = self.closest_home(game_state, my_pos)
+            else:
+                mode = "hunt_scared"
+                target = target_ghost.get_position()
 
-        return random.choice(best_actions)
-
-    def get_successor(self, game_state, action):
-        """
-        Finds the next successor which is a grid position (location tuple).
-        """
-        successor = game_state.generate_successor(self.index, action)
-        pos = successor.get_agent_state(self.index).get_position()
-        if pos != nearest_point(pos):
-            # Only half a grid position was covered
-            return successor.generate_successor(self.index, action)
+        elif state.num_carrying >= self.return_threshold:
+            # 4. RETORNO PARA ANOTAR PUNTOS.
+            mode = "return"
+            target = self.closest_home(game_state, my_pos)
+        
         else:
-            return successor
+            # 5. RECOLECCIÓN Y ATAQUE ESTRATÉGICO.
+            mode = "collect"
+            food = self.get_food(game_state).as_list()
+            capsules = self.get_capsules(game_state)
+            
+            target = self.best_offensive_target(game_state, my_pos, food, capsules, visible_ghosts)
 
-    def evaluate(self, game_state, action):
+        # A* → next step only
+        nxt = self.astar_next(game_state, my_pos, target, mode)
+        if not nxt:
+            return random.choice(legal)
+
+        return self.direction_from(my_pos, nxt)
+
+    # -----------------------------------------------
+    # RESTO DE FUNCIONES (best_offensive_target, closest_home, astar_next, step_cost, direction_from)
+    # Se mantienen IGUALES a la versión V2 (cuidado con copiar solo la parte superior).
+    # -----------------------------------------------
+
+    def best_offensive_target(self, game_state, pos, food_list, capsules, ghosts):
         """
-        Computes a linear combination of features and feature weights
+        Elige entre Power Capsules cercanas y la comida más segura/cercana.
         """
-        features = self.get_features(game_state, action)
-        weights = self.get_weights(game_state, action)
-        return features * weights
+        # Prioridad a las cápsulas cercanas
+        near_capsules = [
+            c for c in capsules 
+            if self.get_maze_distance(pos, c) <= self.capsule_radius
+        ]
+        if near_capsules:
+            return min(near_capsules, key=lambda c: self.get_maze_distance(pos, c))
 
-    def get_features(self, game_state, action):
+        if not food_list:
+            return self.start
+
+        # Comida que no está demasiado cerca de fantasmas no asustados
+        safe_food = []
+        for f in food_list:
+            danger = False
+            for g in ghosts:
+                # Solo fantasmas NO asustados son una amenaza aquí
+                if g.scared_timer == 0 and self.get_maze_distance(f, g.get_position()) <= self.danger_radius:
+                    danger = True
+                    break
+            if not danger:
+                safe_food.append(f)
+
+        if safe_food:
+            # Elige la comida segura más cercana
+            return min(safe_food, key=lambda f: self.get_maze_distance(pos, f))
+        else:
+            # Si toda la comida está cerca de fantasmas, elige la comida más cercana asumiendo riesgo
+            return min(food_list, key=lambda f: self.get_maze_distance(pos, f))
+
+    # -----------------------------------------------
+
+    def closest_home(self, game_state, pos):
+        walls = game_state.get_walls()
+        mid = walls.width // 2
+        x_home = mid - 1 if self.red else mid
+        candidates = [(x_home, y) for y in range(walls.height) if not walls[x_home][y]]
+        if not candidates: return self.start
+        return min(candidates, key=lambda p: self.get_maze_distance(pos, p))
+
+    # -----------------------------------------------
+
+    def astar_next(self, game_state, start, goal, mode):
+        """Simplified A*: returns only the next step towards goal."""
+        walls = game_state.get_walls()
+        start = tuple(start)
+        goal = tuple(goal)
+
+        frontier = util.PriorityQueue()
+        frontier.push(start, 0)
+
+        came = {}
+        cost = {start: 0}
+
+        start_time = time.time()
+        search_timeout = self.search_timeout
+
+        while not frontier.is_empty():
+            if time.time() - start_time > search_timeout:
+                return None
+
+            cur = frontier.pop()
+            if cur == goal:
+                break
+
+            for nxt in neighbours(cur, walls):
+                new_cost = cost[cur] + self.step_cost(game_state, nxt, mode)
+                if nxt not in cost or new_cost < cost[nxt]:
+                    cost[nxt] = new_cost
+                    pr = new_cost + manhattan(nxt, goal)
+                    frontier.push(nxt, pr)
+                    came[nxt] = cur
+
+        if goal not in came:
+            return None
+
+        step = goal
+        while came[step] != start:
+            step = came[step]
+        return step
+
+    # -----------------------------------------------
+
+    def step_cost(self, game_state, pos, mode):
         """
-        Returns a counter of features for the state
+        Costo personalizado que penaliza fantasmas no asustados y premia la caza.
         """
-        features = util.Counter()
-        successor = self.get_successor(game_state, action)
-        features['successor_score'] = self.get_score(successor)
-        return features
+        base = 1.0
 
-    def get_weights(self, game_state, action):
-        """
-        Normally, weights do not depend on the game state.  They can be either
-        a counter or a dictionary.
-        """
-        return {'successor_score': 1.0}
+        enemies = [game_state.get_agent_state(i) for i in self.get_opponents(game_state)]
+        ghosts = [e for e in enemies if not e.is_pacman and e.get_position()]
+
+        for g in ghosts:
+            g_pos = g.get_position()
+            d = self.get_maze_distance(pos, g_pos)
+
+            if g.scared_timer > 0:
+                # Fantasma Asustado: REDUCCIÓN AGRESIVA DEL COSTO para acercarse.
+                if mode == "hunt_scared":
+                    base -= (40 - g.scared_timer) * 0.5 
+                    if d <= 1: base = 0.01
+                # En otros modos, se ignora la penalización.
+            else:
+                # Fantasma NO Asustado: Aumento del costo (Amenaza).
+                if d == 0:
+                    return 9999
+                elif d == 1:
+                    base += 150 
+                elif d == 2:
+                    base += 30
+                elif d <= 4:
+                    base += 5
+
+        if mode == "return" or mode == "evade":
+            base *= 0.8
+        
+        return max(0.01, base)
+
+    # -----------------------------------------------
+
+    def direction_from(self, a, b):
+        ax, ay = a
+        bx, by = b
+        if bx == ax + 1: return Directions.EAST
+        if bx == ax - 1: return Directions.WEST
+        if by == ay + 1: return Directions.NORTH
+        if by == ay - 1: return Directions.SOUTH
+        return Directions.STOP
 
 
-class OffensiveReflexAgent(ReflexCaptureAgent):
-    """
-  A reflex agent that seeks food. This is an agent
-  we give you to get an idea of what an offensive agent might look like,
-  but it is by no means the best or only way to build an offensive agent.
-  """
+##############################################
+#                 DEFENSIVE AGENT            #
+##############################################
 
-    def get_features(self, game_state, action):
-        features = util.Counter()
-        successor = self.get_successor(game_state, action)
-        food_list = self.get_food(successor).as_list()
-        features['successor_score'] = -len(food_list)  # self.get_score(successor)
+# NOTA: EL AGENTE DEFENSIVO NO NECESITA HISTERESIS EN ESTA VERSIÓN.
+# Mantiene el código de la versión V2.
 
-        # Compute distance to the nearest food
+class HybridDefensive(CaptureAgent):
 
-        if len(food_list) > 0:  # This should always be True,  but better safe than sorry
-            my_pos = successor.get_agent_state(self.index).get_position()
-            min_distance = min([self.get_maze_distance(my_pos, food) for food in food_list])
-            features['distance_to_food'] = min_distance
-        return features
+    def register_initial_state(self, game_state):
+        super().register_initial_state(game_state)
+        self.distancer.get_maze_distances()
+        self.start = game_state.get_agent_position(self.index)
 
-    def get_weights(self, game_state, action):
-        return {'successor_score': 100, 'distance_to_food': -1}
+        self.patrol_points = self.compute_patrol(game_state)
+        self.current_patrol_index = 0
+        self.last_seen_invader = None
+
+    # -----------------------------------------------
+
+    def choose_action(self, game_state):
+        legal = game_state.get_legal_actions(self.index)
+        legal = [a for a in legal if a != Directions.STOP]
+        if not legal:
+            return Directions.STOP
+
+        my_pos = game_state.get_agent_position(self.index)
+
+        invaders = self.get_invaders(game_state)
+
+        if invaders:
+            inv = min(invaders, key=lambda s: self.get_maze_distance(my_pos, s.get_position()))
+            self.last_seen_invader = inv.get_position() 
+            target = self.last_seen_invader
+            mode = "chase"
+        
+        elif self.last_seen_invader:
+            if self.get_maze_distance(my_pos, self.last_seen_invader) < 5:
+                target = self.last_seen_invader
+                mode = "chase_last_seen"
+            else:
+                self.last_seen_invader = None
+                target = self.patrol_points[self.current_patrol_index]
+                mode = "patrol"
+        
+        else:
+            target = self.patrol_points[self.current_patrol_index]
+            mode = "patrol"
+            
+            if my_pos == target:
+                self.current_patrol_index = (self.current_patrol_index + 1) % len(self.patrol_points)
+                target = self.patrol_points[self.current_patrol_index]
+        
+        nxt = self.astar_next(game_state, my_pos, target, mode)
+        if not nxt:
+            return random.choice(legal)
+
+        return self.direction_from(my_pos, nxt)
+
+    # -----------------------------------------------
+
+    def compute_patrol(self, game_state):
+        walls = game_state.get_walls()
+        food_on_side = self.get_food_you_are_defending(game_state).as_list()
+        
+        if food_on_side:
+            food_on_side.sort(key=lambda p: manhattan(self.start, p), reverse=True)
+            return food_on_side[:min(6, len(food_on_side))]
+        
+        mid = walls.width // 2
+        x_home = mid - 1 if self.red else mid
+        candidates = [(x_home, y) for y in range(walls.height) if not walls[x_home][y]]
+        
+        return random.sample(candidates, min(6, len(candidates))) if candidates else [self.start]
 
 
-class DefensiveReflexAgent(ReflexCaptureAgent):
-    """
-    A reflex agent that keeps its side Pacman-free. Again,
-    this is to give you an idea of what a defensive agent
-    could be like.  It is not the best or only way to make
-    such an agent.
-    """
+    # -----------------------------------------------
 
-    def get_features(self, game_state, action):
-        features = util.Counter()
-        successor = self.get_successor(game_state, action)
+    def get_invaders(self, game_state):
+        enemies = [game_state.get_agent_state(i) for i in self.get_opponents(game_state)]
+        return [e for e in enemies if e.is_pacman and e.get_position()]
 
-        my_state = successor.get_agent_state(self.index)
-        my_pos = my_state.get_position()
+    def astar_next(self, game_state, start, goal, mode):
+        walls = game_state.get_walls()
+        start = tuple(start)
+        goal = tuple(goal)
 
-        # Computes whether we're on defense (1) or offense (0)
-        features['on_defense'] = 1
-        if my_state.is_pacman: features['on_defense'] = 0
+        frontier = util.PriorityQueue()
+        frontier.push(start, 0)
 
-        # Computes distance to invaders we can see
-        enemies = [successor.get_agent_state(i) for i in self.get_opponents(successor)]
-        invaders = [a for a in enemies if a.is_pacman and a.get_position() is not None]
-        features['num_invaders'] = len(invaders)
-        if len(invaders) > 0:
-            dists = [self.get_maze_distance(my_pos, a.get_position()) for a in invaders]
-            features['invader_distance'] = min(dists)
+        came = {}
+        cost = {start: 0}
 
-        if action == Directions.STOP: features['stop'] = 1
-        rev = Directions.REVERSE[game_state.get_agent_state(self.index).configuration.direction]
-        if action == rev: features['reverse'] = 1
+        t0 = time.time()
+        search_timeout = 0.35
 
-        return features
+        while not frontier.is_empty():
+            if time.time() - t0 > search_timeout:
+                return None
 
-    def get_weights(self, game_state, action):
-        return {'num_invaders': -1000, 'on_defense': 100, 'invader_distance': -10, 'stop': -100, 'reverse': -2}
+            cur = frontier.pop()
+            if cur == goal:
+                break
+
+            for nxt in neighbours(cur, walls):
+                c = cost[cur] + 1
+                if nxt not in cost or c < cost[nxt]:
+                    cost[nxt] = c
+                    frontier.push(nxt, c + manhattan(nxt, goal))
+                    came[nxt] = cur
+
+        if goal not in came:
+            return None
+
+        step = goal
+        while came[step] != start:
+            step = came[step]
+        return step
+
+    def direction_from(self, a, b):
+        ax, ay = a
+        bx, by = b
+        if bx == ax + 1: return Directions.EAST
+        if bx == ax - 1: return Directions.WEST
+        if by == ay + 1: return Directions.NORTH
+        if by == ay - 1: return Directions.SOUTH
+        return Directions.STOP

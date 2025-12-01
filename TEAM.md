@@ -11,8 +11,7 @@
 **Team members:**
 
 * Student 1's U214974 - Andrea Sallo Ribas- andrea.sallo01@estudiant.upf.edu - andreasallo
-* Student 2's Student number - Full Name - Student email - Student Github id
-* Student 3's Student number - Full Name - Student email - Student Github id
+* Student 2's U215091 - Axel Del Val Farré-Escofet - axel.delval01@estudiant.upf.edu - PKneo
 
 Replace the lines above with the correct details of members. Delete or add lines as needed.
 

@@ -45,7 +45,7 @@ def neighbours(pos, walls): #Returns legal neighbouring positions. Used in A* se
 
 
 ##############################################
-#         OFFENSIVE / HYBRID AGENT           #
+#         OFFENSIVE           #
 ##############################################
 
 class HybridOffensive(CaptureAgent):
@@ -442,4 +442,5 @@ class HybridDefensive(CaptureAgent):
         if bx == ax - 1: return Directions.WEST
         if by == ay + 1: return Directions.NORTH
         if by == ay - 1: return Directions.SOUTH
+
         return Directions.STOP
